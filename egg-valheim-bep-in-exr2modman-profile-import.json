@@ -1,0 +1,279 @@
+{
+    "_comment": "DO NOT EDIT: FILE GENERATED AUTOMATICALLY BY PANEL",
+    "meta": {
+        "version": "PLCN_v3",
+        "update_url": null
+    },
+    "exported_at": "2026-07-14T12:58:49+00:00",
+    "name": "Valheim BepInEx (r2modman Profile Import)",
+    "author": "eggs@goover.dev",
+    "uuid": "b50e0a09-3475-4c4c-abd2-62b4880a35c9",
+    "description": "A brutal exploration and survival game for 1-10 players, set in a procedurally-generated purgatory\ninspired by viking culture incl the Plugin Framework BepInEx.\nCustom fork: adds support for importing r2modman / Thunderstore Mod Manager profile export codes.",
+    "icon": null,
+    "tags": [
+        "bepinex-mods"
+    ],
+    "features": [
+        "steam_disk_space"
+    ],
+    "docker_images": {
+        "ghcr.io/parkervcp/games:valheim": "ghcr.io/parkervcp/games:valheim"
+    },
+    "file_denylist": [],
+    "startup_commands": {
+        "Default": "export DOORSTOP_ENABLED=1; export DOORSTOP_TARGET_ASSEMBLY=./BepInEx/core/BepInEx.Preloader.dll; export LD_LIBRARY_PATH=\"./doorstop_libs:./linux64:$LD_LIBRARY_PATH\"; export LD_PRELOAD=\"libdoorstop_x64.so:$LD_PRELOAD\"; export LD_LIBRARY_PATH=\"./linux64:$LD_LIBRARY_PATH\"; export SteamAppId=892970; ./valheim_server.x86_64 -nographics -batchmode -name \"{{SERVER_NAME}}\" -port {{SERVER_PORT}} -world \"{{WORLD}}\" -password \"{{PASSWORD}}\" -public {{PUBLIC_SERVER}} -saveinterval {{BACKUP_INTERVAL}} -backups {{BACKUP_COUNT}} -backupshort {{BACKUP_SHORTTIME}} -backuplong {{BACKUP_LONGTIME}} $( [[ {{ENABLE_CROSSPLAY}} -eq 1 ]] && echo \" -crossplay \") > >(sed -uE \"{{CONSOLE_FILTER}}\")"
+    },
+    "config": {
+        "files": "[]",
+        "startup": "{\n    \"done\": \"Game server connected\"\n}",
+        "logs": "[]",
+        "stop": "^C"
+    },
+    "scripts": {
+        "installation": {
+            "script": "#!/bin/bash\n# Valheim Installation Script\n#\n# Server Files: /mnt/server\n# Image to install with is 'debian:buster-slim'\napt -y update\napt -y --no-install-recommends --no-install-suggests install wget jq unzip\n\n## just in case someone removed the defaults.\nif [ \"${STEAM_USER}\" == \"\" ]; then\n    echo -e \"steam user is not set.\n\"\n    echo -e \"Using anonymous user.\n\"\n    # ------------------------------\n    # Steam user defaults\n    # ------------------------------\n    : \"${STEAM_USER:=anonymous}\"\n    : \"${STEAM_PASS:=}\"\n    : \"${STEAM_AUTH:=}\"\nelse\n    echo -e \"user set to ${STEAM_USER}\"\nfi\n\n## download and install steamcmd\ncd /tmp\nmkdir -p /mnt/server/steamcmd\ncurl -sSL -o steamcmd.tar.gz https://steamcdn-a.akamaihd.net/client/installer/steamcmd_linux.tar.gz\ntar -xzvf steamcmd.tar.gz -C /mnt/server/steamcmd\ncd /mnt/server/steamcmd\n\n# SteamCMD fails otherwise for some reason, even running as root.\n# This is changed at the end of the install process anyways.\nchown -R root:root /mnt\nexport HOME=/mnt/server\n\n## install game using steamcmd\n./steamcmd.sh +force_install_dir /mnt/server +login ${STEAM_USER} ${STEAM_PASS} ${STEAM_AUTH} +app_update ${SRCDS_APPID} ${EXTRA_FLAGS} +quit\n\n## set up 32 bit libraries\nmkdir -p /mnt/server/.steam/sdk32\ncp -v linux32/steamclient.so ../.steam/sdk32/steamclient.so\n\n## set up 64 bit libraries\nmkdir -p /mnt/server/.steam/sdk64\ncp -v linux64/steamclient.so ../.steam/sdk64/steamclient.so\n\necho \"-------------------------------------------------------\"\necho \"installing BepInEx and Selected ModPacks...\"\necho \"-------------------------------------------------------\"\n\nif [ ! -z \"$V_MODPACK\" ] && [ ! -z \"$V_PROFILE_CODE\" ]; then\n  echo \"ERROR: Both ModPack (V_MODPACK) and Profile Code (V_PROFILE_CODE) are set.\"\n  echo \"Please only use one mod-installation method at a time. Aborting mod install.\"\n  V_MODPACK=\"\"\n  V_PROFILE_CODE=\"\"\nfi\n\n# Registers a mod this script just extracted into the same JSON ledger file\n# (.valheim-mod-manager.json, inside BepInEx/plugins) that Pelican's Valheim\n# Mod Manager plugin reads. Without this, mods installed here are only ever\n# detected by the plugin's filesystem scan and shown as \"Unknown\" (metadata\n# only, no Update/Remove/Disable support). Registering them here makes them\n# show up fully \"Installed\" and manageable through the plugin, same as mods\n# installed via its own Install button.\n#\n# Args: $1 destination_directory (e.g. /mnt/server/BepInEx/plugins)\n#       $2 wrapper_name          (the \"Owner-Name\" folder the mod was extracted into)\n#       $3 fallback_version      (used only if manifest.json has no version_number)\nregister_installed_mod() {\n  local destination_directory=\"$1\"\n  local wrapper_name=\"$2\"\n  local fallback_version=\"${3:-0.0.0}\"\n\n  local metadata_file=\"$destination_directory/.valheim-mod-manager.json\"\n  if [ ! -f \"$metadata_file\" ]; then\n    echo '{\"mods\":{}}' > \"$metadata_file\"\n  fi\n\n  local manifest_path=\"$destination_directory/$wrapper_name/manifest.json\"\n  local mod_version=\"$fallback_version\"\n  local mod_dependencies=\"[]\"\n  if [ -f \"$manifest_path\" ] && jq -e . \"$manifest_path\" >/dev/null 2>&1; then\n    mod_version=$(jq -r --arg fallback \"$fallback_version\" '.version_number // $fallback' \"$manifest_path\")\n    mod_dependencies=$(jq -c '.dependencies // []' \"$manifest_path\")\n  fi\n\n  # Mirrors Chr0mX\\ValheimModManager\\Support\\ModManifestParser::parseFullName():\n  # the last \"-\"-separated segment is the mod name, everything before it is\n  # the owner/namespace.\n  local namespace=\"${wrapper_name%-*}\"\n  local mod_name=\"${wrapper_name##*-}\"\n  local mod_key\n  mod_key=$(echo \"$wrapper_name\" | tr '[:upper:]' '[:lower:]')\n  local now_iso\n  now_iso=$(date -u +\"%Y-%m-%dT%H:%M:%SZ\")\n\n  local tmp_metadata\n  tmp_metadata=$(mktemp)\n  if jq --arg key \"$mod_key\" \\\n     --arg namespace \"$namespace\" \\\n     --arg name \"$mod_name\" \\\n     --arg version \"$mod_version\" \\\n     --argjson dependencies \"$mod_dependencies\" \\\n     --arg now \"$now_iso\" \\\n     --arg wrapper \"$wrapper_name\" \\\n     '.mods[$key] = {\n        namespace: $namespace,\n        name: $name,\n        version: $version,\n        directory: \"BepInEx/plugins\",\n        files: [$wrapper],\n        dependencies: $dependencies,\n        disabled: false,\n        installed_at: $now,\n        updated_at: $now\n      }' \"$metadata_file\" > \"$tmp_metadata\"; then\n    mv \"$tmp_metadata\" \"$metadata_file\"\n  else\n    echo \"WARNING: Failed to update mod metadata ledger for $wrapper_name\"\n    rm -f \"$tmp_metadata\"\n  fi\n}\n\nif ! api_response=$(curl -sfSL -H \"accept: application/json\" \"$BEPINEX_URL\"); then\n        fatal \"Error: could not retrieve BepInEx release info from Thunderstore.io API\"\nfi\n\ndownload_url=$(jq -r  \".latest.download_url\" <<< \"$api_response\" )\nversion_number=$(jq -r  \".latest.version_number\" <<< \"$api_response\" )\n\nif [ ! -z \"$V_MODPACK\" ]\nthen\n#Modpack Name dashes to slashes for URL\nV_MODPACK=$(echo \"$V_MODPACK\" | sed 's/-/\\//g')\n\n#Extract dependencies from ModPack JSON data\nV_MODPACK_DEPENDENCIES=$(curl -sfSL -H \"accept: application/json\" \"https://thunderstore.io/api/experimental/package/${V_MODPACK}\" | jq -r '.dependencies[]')\nfi\n\ncd /mnt/server\n#echo $download_url\nwget --content-disposition $download_url\nunzip -o denikson-BepInExPack_Valheim-${version_number}.zip\ncp -r /mnt/server/BepInExPack_Valheim/* /mnt/server\n\nif [ ! -z \"$V_MODPACK\" ]\nthen\n#Delete Old Mods\nrm -rf /mnt/server/BepInEx/plugins/*\n\n#Download and extract the modpack dlls files\nfor V_MODPACK_DEPENDENCY in $V_MODPACK_DEPENDENCIES; do\n  #ignore bepinex\n  if [[ \"$V_MODPACK_DEPENDENCY\" == *\"denikson-BepInExPack_Valheim\"* ]]; then\n    continue  # Skip this dependency\n  fi\n  \n  #replace dashes with slashes for url\n  V_MODPACK_DEPENDENCY_WITH_SLASH=$(echo \"$V_MODPACK_DEPENDENCY\" | sed 's/-/\\//g')\n  \n  #download dependencies\n  wget -O \"$V_MODPACK_DEPENDENCY.zip\" \"https://thunderstore.io/package/download/$V_MODPACK_DEPENDENCY_WITH_SLASH\"\n\n  #Set the destination directory and ensure it exists\n  destination_directory=\"/mnt/server/BepInEx/plugins\"\n  if [ ! -d \"$destination_directory\" ]; then\n    mkdir -p \"$destination_directory\"\n  fi\n\n  #Strip the trailing \"-major.minor.patch\" to get the \"Owner-Name\" package folder name,\n  #then extract the whole zip (manifest.json, icon.png, dlls, subfolders) into its own\n  #folder instead of flattening just the .dlls. Mod managers such as Pelican's Valheim\n  #Mod Manager plugin read manifest.json to show the mod's real name/author/version;\n  #junking the paths and keeping only the .dlls threw that metadata away.\n  wrapper_name=$(echo \"$V_MODPACK_DEPENDENCY\" | sed -E 's/-[0-9]+(\\.[0-9]+){0,3}$//')\n  mkdir -p \"$destination_directory/$wrapper_name\"\n  unzip -o \"$V_MODPACK_DEPENDENCY.zip\" -d \"$destination_directory/$wrapper_name\"\n\n  #Register this mod in the plugin's metadata ledger so it shows up as fully\n  #\"Installed\" (not just \"Unknown\") in Pelican's Valheim Mod Manager.\n  mod_version_fallback=$(echo \"$V_MODPACK_DEPENDENCY\" | grep -oE '[0-9]+(\\.[0-9]+){0,3}$')\n  register_installed_mod \"$destination_directory\" \"$wrapper_name\" \"${mod_version_fallback:-0.0.0}\"\n\n  #Cleanup\n  rm $V_MODPACK_DEPENDENCY.zip\ndone\nfi\n\nif [ ! -z \"$V_PROFILE_CODE\" ]\nthen\necho \"-------------------------------------------------------\"\necho \"Importing r2modman / Thunderstore Mod Manager profile: $V_PROFILE_CODE\"\necho \"-------------------------------------------------------\"\n\nmkdir -p /tmp/profile\n\n#Fetch with a few retries, mirroring official client behaviour (5 attempts)\nprofile_fetch_ok=false\nfor attempt in 1 2 3 4 5; do\n  http_status=$(curl -sSL -A \"Mozilla/5.0 (X11; Linux x86_64) ValheimEggInstaller/1.0\" -o /tmp/profile/profile.raw -w \"%{http_code}\" \"https://thunderstore.io/api/experimental/legacyprofile/get/${V_PROFILE_CODE}/\")\n  if [ \"$http_status\" -ge 200 ] && [ \"$http_status\" -lt 300 ]; then\n    profile_fetch_ok=true\n    break\n  fi\n  echo \"DEBUG: attempt $attempt got HTTP $http_status: $(head -c 200 /tmp/profile/profile.raw | tr -d '\\n')\"\n  sleep 1\ndone\n\nif [ \"$profile_fetch_ok\" = false ] || [ ! -s /tmp/profile/profile.raw ]; then\n  echo \"ERROR: Could not fetch profile code '$V_PROFILE_CODE'. It may be invalid or expired. Skipping profile import.\"\nelse\n  echo \"DEBUG: raw response size: $(wc -c < /tmp/profile/profile.raw) bytes\"\n  echo \"DEBUG: raw response head: $(head -c 120 /tmp/profile/profile.raw | tr -d '\\n')\"\n  if head -c 20 /tmp/profile/profile.raw | grep -qi '<!doctype\\|<html'; then\n    echo \"NOTE: Response looks like an HTML page, not profile data (likely a CDN/bot-protection challenge page or error page).\"\n  elif head -c 1 /tmp/profile/profile.raw | grep -q '{'; then\n    echo \"NOTE: Response looks like a JSON object, not profile data (likely an API error response).\"\n  fi\n\n  #Response body is \"#r2modman\" followed by the base64-encoded zip data - strip the prefix before decoding\n  if head -c 9 /tmp/profile/profile.raw | grep -q '^#r2modman'; then\n    sed 's/^#r2modman//' /tmp/profile/profile.raw | tr -d '[:space:]' > /tmp/profile/profile.b64\n  else\n    echo \"NOTE: Response did not start with '#r2modman' prefix - treating entire body as raw base64 instead.\"\n    tr -d '[:space:]' < /tmp/profile/profile.raw > /tmp/profile/profile.b64\n  fi\n\n  if ! base64 -d /tmp/profile/profile.b64 > /tmp/profile/profile.zip 2>/tmp/profile/b64err.log; then\n    echo \"ERROR: Failed to base64-decode profile data for '$V_PROFILE_CODE'. Skipping profile import.\"\n    echo \"DEBUG: base64 error: $(cat /tmp/profile/b64err.log)\"\n  elif ! unzip -o /tmp/profile/profile.zip -d /tmp/profile > /dev/null; then\n    echo \"ERROR: Downloaded profile data for '$V_PROFILE_CODE' was not a valid zip. Skipping profile import.\"\n  elif [ ! -f /tmp/profile/export.r2x ]; then\n    echo \"ERROR: export.r2x not found in profile archive. Skipping profile import.\"\n  else\n    #Delete Old Mods\n    rm -rf /mnt/server/BepInEx/plugins/*\n    destination_directory=\"/mnt/server/BepInEx/plugins\"\n    mkdir -p \"$destination_directory\"\n\n    #export.r2x stores each mod as: name / version.{major,minor,patch} / enabled\n    #Build \"Name-Major.Minor.Patch\" dependency strings from the nested version fields\n    mapfile -t PROFILE_MODS < <(awk '\n      /^[[:space:]]*- name:/ {\n        if (name != \"\") { if (enabled != \"false\") print name\"-\"major\".\"minor\".\"patch }\n        name=$0; sub(/^[[:space:]]*- name:[[:space:]]*/,\"\",name)\n        major=\"0\"; minor=\"0\"; patch=\"0\"; enabled=\"true\"; next\n      }\n      /^[[:space:]]*major:/ { major=$2; next }\n      /^[[:space:]]*minor:/ { minor=$2; next }\n      /^[[:space:]]*patch:/ { patch=$2; next }\n      /^[[:space:]]*enabled:/ { enabled=$2; next }\n      END { if (name != \"\") { if (enabled != \"false\") print name\"-\"major\".\"minor\".\"patch } }\n    ' /tmp/profile/export.r2x)\n\n    echo \"Found ${#PROFILE_MODS[@]} enabled mod(s) in profile.\"\n\n    for PROFILE_MOD in \"${PROFILE_MODS[@]}\"; do\n      #ignore bepinex, it's already installed above\n      if [[ \"$PROFILE_MOD\" == *\"BepInExPack\"* ]]; then\n        continue\n      fi\n\n      #replace dashes with slashes for url\n      PROFILE_MOD_WITH_SLASH=$(echo \"$PROFILE_MOD\" | sed 's/-/\\//g')\n\n      echo \"Installing mod: $PROFILE_MOD\"\n\n      if ! wget -q -U \"Mozilla/5.0 (X11; Linux x86_64) ValheimEggInstaller/1.0\" -O \"/tmp/profile/mod.zip\" \"https://thunderstore.io/package/download/$PROFILE_MOD_WITH_SLASH\"; then\n        echo \"WARNING: Failed to download $PROFILE_MOD, skipping.\"\n        continue\n      fi\n\n      #Strip the trailing \"-major.minor.patch\" to get the \"Owner-Name\" package folder\n      #name, then extract the whole zip (manifest.json, icon.png, dlls, subfolders) into\n      #its own folder instead of flattening just the .dlls. Mod managers such as\n      #Pelican's Valheim Mod Manager plugin read manifest.json to show the mod's real\n      #name/author/version; junking the paths and keeping only the .dlls threw that\n      #metadata away.\n      wrapper_name=$(echo \"$PROFILE_MOD\" | sed -E 's/-[0-9]+(\\.[0-9]+){0,3}$//')\n      mkdir -p \"$destination_directory/$wrapper_name\"\n      unzip -o \"/tmp/profile/mod.zip\" -d \"$destination_directory/$wrapper_name\"\n\n      #Register this mod in the plugin's metadata ledger so it shows up as\n      #fully \"Installed\" (not just \"Unknown\") in Pelican's Valheim Mod Manager.\n      mod_version_fallback=$(echo \"$PROFILE_MOD\" | grep -oE '[0-9]+(\\.[0-9]+){0,3}$')\n      register_installed_mod \"$destination_directory\" \"$wrapper_name\" \"${mod_version_fallback:-0.0.0}\"\n\n      rm -f /tmp/profile/mod.zip\n    done\n\n    #Bring across any exported BepInEx config overrides\n    if [ -d /tmp/profile/config ]; then\n      mkdir -p /mnt/server/BepInEx/config\n      cp -r /tmp/profile/config/* /mnt/server/BepInEx/config/\n    fi\n  fi\nfi\n\n#Cleanup\nrm -rf /tmp/profile\nfi\n\n##cleanup\necho \"-------------------------------------------------------\"\necho \"cleanup files...\"\necho \"-------------------------------------------------------\"\nrm -fR BepInExPack_Valheim\nrm -fR icon.png\nrm -fR denikson-BepInExPack_Valheim-*\nrm -fR manifest.json\nrm -fR README.m\n\n#rm -fR start_*\n\necho \"-------------------------------------------------------\"\necho \"Installation completed\"\necho \"-------------------------------------------------------\"",
+            "container": "ghcr.io/parkervcp/installers:debian",
+            "entrypoint": "bash"
+        }
+    },
+    "variables": [
+        {
+            "name": "Auto Update",
+            "description": "",
+            "env_variable": "AUTO_UPDATE",
+            "default_value": "1",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": [
+                "boolean"
+            ],
+            "sort": 5
+        },
+        {
+            "name": "Backup Count",
+            "description": "Sets how many automatic backups will be kept. The first is the 'short' backup length, and the rest\nare the 'long' backup length. When default values are used means one backup that is 2 hours old, and\n3 backups that are 12 hours apart. Default: 4.",
+            "env_variable": "BACKUP_COUNT",
+            "default_value": "4",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": [
+                "required",
+                "numeric",
+                "min:0"
+            ],
+            "sort": 10
+        },
+        {
+            "name": "Backup Interval",
+            "description": "Change how often the world will save in seconds. Default: 1800 (30 minutes).",
+            "env_variable": "BACKUP_INTERVAL",
+            "default_value": "1800",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": [
+                "required",
+                "numeric",
+                "min:0"
+            ],
+            "sort": 9
+        },
+        {
+            "name": "Backup Longtime",
+            "description": "Sets the interval between the subsequent automatic backups in seconds. Default: 43200 (12 hours).",
+            "env_variable": "BACKUP_LONGTIME",
+            "default_value": "43200",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": [
+                "required",
+                "numeric",
+                "min:0"
+            ],
+            "sort": 12
+        },
+        {
+            "name": "Backup Shorttime",
+            "description": "Sets the interval between the first automatic backups in seconds. Default: 7200 (2 hours).",
+            "env_variable": "BACKUP_SHORTTIME",
+            "default_value": "7200",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": [
+                "required",
+                "numeric",
+                "min:0"
+            ],
+            "sort": 11
+        },
+        {
+            "name": "Beta Branch",
+            "description": "",
+            "env_variable": "SRCDS_BETAID",
+            "default_value": "",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": [
+                "max:30"
+            ],
+            "sort": 7
+        },
+        {
+            "name": "Beta Password",
+            "description": "",
+            "env_variable": "SRCDS_BETAPASS",
+            "default_value": "",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": [
+                "max:30"
+            ],
+            "sort": 8
+        },
+        {
+            "name": "Enable Crossplay",
+            "description": "Enable crossplay support",
+            "env_variable": "ENABLE_CROSSPLAY",
+            "default_value": "0",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": [
+                "boolean"
+            ],
+            "sort": 6
+        },
+        {
+            "name": "ModPack",
+            "description": "Enter the Dependency String name for a ModPack to automatically be installed\r\nNOTE: If the modpack Updates, you will need to update this variable with the new Dependency String.\nThis is done to allow Old Versions to be used.\r\nCHANGING THIS REQUIRES A SERVER REINSTALL\r\nCannot be used together with Profile Code - only set one.",
+            "env_variable": "V_MODPACK",
+            "default_value": "",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": [
+                "string",
+                "nullable"
+            ],
+            "sort": 13
+        },
+        {
+            "name": "Profile Code",
+            "description": "r2modman / Thunderstore Mod Manager profile export code (UUID format, e.g. 019f2da9-2a31-0f33-8291-1a960beefb9e).\r\nAll mods in the profile, plus their exported BepInEx config, will be installed automatically.\r\nCannot be used together with ModPack - only set one.\r\nCHANGING THIS REQUIRES A SERVER REINSTALL",
+            "env_variable": "V_PROFILE_CODE",
+            "default_value": "",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": [
+                "nullable",
+                "string",
+                "max:36",
+                "regex:/^[A-Za-z0-9-]*$/"
+            ],
+            "sort": 13.5
+        },
+        {
+            "name": "Public Server",
+            "description": "",
+            "env_variable": "PUBLIC_SERVER",
+            "default_value": "1",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": [
+                "boolean"
+            ],
+            "sort": 4
+        },
+        {
+            "name": "Server Name",
+            "description": "Name that appears in server browser.",
+            "env_variable": "SERVER_NAME",
+            "default_value": "My Server",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": [
+                "required",
+                "string",
+                "max:60"
+            ],
+            "sort": 1
+        },
+        {
+            "name": "Server Password",
+            "description": "Server password.",
+            "env_variable": "PASSWORD",
+            "default_value": "secret",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": [
+                "required",
+                "string",
+                "min:5",
+                "max:20"
+            ],
+            "sort": 2
+        },
+        {
+            "name": "World Name",
+            "description": "Name to load if switching between multiple saved worlds.",
+            "env_variable": "WORLD",
+            "default_value": "Dedicated",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": [
+                "required",
+                "string",
+                "max:20"
+            ],
+            "sort": 3
+        },
+        {
+            "name": "[System] App ID",
+            "description": "Valheim steam app id for auto updates.",
+            "env_variable": "SRCDS_APPID",
+            "default_value": "896660",
+            "user_viewable": true,
+            "user_editable": false,
+            "rules": [
+                "nullable",
+                "numeric"
+            ],
+            "sort": 15
+        },
+        {
+            "name": "[System] BepInEx  URL",
+            "description": "",
+            "env_variable": "BEPINEX_URL",
+            "default_value": "https://thunderstore.io/api/experimental/package/denikson/BepInExPack_Valheim/",
+            "user_viewable": false,
+            "user_editable": false,
+            "rules": [
+                "required",
+                "url"
+            ],
+            "sort": 17
+        },
+        {
+            "name": "[System] Console Filter",
+            "description": "Remove unwanted outputs from the console.",
+            "env_variable": "CONSOLE_FILTER",
+            "default_value": "/^\\(Filename:.*Line:[[:space:]]+[[:digit:]]+\\)$/d; /^([[:space:]]+)?$/d",
+            "user_viewable": false,
+            "user_editable": false,
+            "rules": [
+                "string"
+            ],
+            "sort": 14
+        },
+        {
+            "name": "[System] LD Library Path",
+            "description": "Required to load server libraries.",
+            "env_variable": "LD_LIBRARY_PATH",
+            "default_value": "./linux64",
+            "user_viewable": false,
+            "user_editable": false,
+            "rules": [
+                "required",
+                "string"
+            ],
+            "sort": 16
+        }
+    ]
+}
